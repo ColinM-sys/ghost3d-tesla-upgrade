@@ -23,7 +23,7 @@ body {
 .grid {
     display: grid;
     grid-template-columns: 1fr 1fr 1fr;
-    grid-template-rows: 1fr 1fr;
+    grid-template-rows: auto 1fr 1fr;
     gap: 8px;
     padding: 8px;
     height: calc(100vh - 50px);
@@ -203,6 +203,20 @@ body {
 </div>
 
 <div class="grid">
+    <!-- Ghost Mode Controls -->
+    <div class="panel" style="grid-column: 1 / -1; padding: 10px 20px;">
+        <div style="display:flex; align-items:center; justify-content:center; gap:15px; width:100%; flex-wrap:wrap;">
+            <div style="font-size:13px; color:#888; margin-right:10px;">GHOST MODE:</div>
+            <div id="ghost-indicator" style="font-family:Consolas; font-size:18px; font-weight:bold; color:#666; min-width:120px; text-align:center;">OFF</div>
+            <button onclick="setGhost('performance')" style="padding:10px 20px; background:linear-gradient(135deg,#cc0000,#ff4444); color:white; border:none; border-radius:8px; cursor:pointer; font-weight:bold; font-size:14px;">BOOST</button>
+            <button onclick="setGhost('standard')" style="padding:10px 20px; background:#333; color:white; border:1px solid #555; border-radius:8px; cursor:pointer; font-size:14px;">STANDARD</button>
+            <button onclick="setGhost('chill')" style="padding:10px 20px; background:#0066aa; color:white; border:none; border-radius:8px; cursor:pointer; font-size:14px;">CHILL</button>
+            <button onclick="setGhost('off')" style="padding:10px 20px; background:#1a1a22; color:#888; border:1px solid #333; border-radius:8px; cursor:pointer; font-size:14px;">OFF</button>
+            <button onclick="honk()" style="padding:10px 20px; background:#aa8800; color:white; border:none; border-radius:8px; cursor:pointer; font-size:14px;">HONK</button>
+            <div style="font-family:Consolas; font-size:12px; color:#555;">Injected: <span id="inject-ct">0</span></div>
+        </div>
+    </div>
+
     <!-- Speed -->
     <div class="panel">
         <div class="panel-title">Speed</div>
@@ -330,6 +344,21 @@ body {
 </div>
 
 <script>
+// Ghost mode controls
+async function setGhost(mode) {
+    try {
+        await fetch('/api/mode', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({mode: mode})
+        });
+    } catch(e) {}
+}
+
+async function honk() {
+    try { await fetch('/api/honk', {method: 'POST'}); } catch(e) {}
+}
+
 // G-Force canvas setup
 const gCanvas = document.getElementById('gforce-canvas');
 const gCtx = gCanvas.getContext('2d');
@@ -535,6 +564,18 @@ async function poll() {
         const slipEl = document.getElementById('slip-val');
         slipEl.textContent = Math.abs(slip).toFixed(1) + '%';
         slipEl.style.color = Math.abs(slip) > 5 ? '#ff4444' : Math.abs(slip) > 2 ? '#ffaa00' : '#00ff66';
+
+        // Ghost mode status
+        const ghostEl = document.getElementById('ghost-indicator');
+        const gm = data.ghost_mode;
+        if (gm) {
+            ghostEl.textContent = gm.toUpperCase();
+            ghostEl.style.color = gm === 'performance' ? '#ff4444' : gm === 'chill' ? '#00aaff' : '#ffffff';
+        } else {
+            ghostEl.textContent = 'OFF';
+            ghostEl.style.color = '#666';
+        }
+        document.getElementById('inject-ct').textContent = data.inject_count || 0;
 
     } catch(e) {
         document.getElementById('conn-dot').className = 'conn-dot dead';

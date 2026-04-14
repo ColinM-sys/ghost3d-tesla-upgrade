@@ -1,0 +1,415 @@
+"""
+Ghost3D - Tesla Performance Controller
+Combined ghost mode injection + CAN reading + performance dashboard.
+Single app that does everything. Works offline.
+
+Usage:
+    python ghost3d.py --port COM5
+    Open http://localhost:9090 in browser
+"""
+import serial
+import serial.tools.list_ports
+import time
+import threading
+import json
+import sys
+import os
+from datetime import datetime
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from pathlib import Path
+
+DEFAULT_BAUD = 115200
+HTTP_PORT = 9090
+
+MODE_BYTES = {
+    "chill": 0x9F,
+    "standard": 0xBF,
+    "performance": 0xDF,
+}
+
+SIGNALS = {
+    0x118: {
+        "DI_accelPedalPos": (32, 8, 0.4, 0, "%"),
+        "DI_brakePedalState": (19, 2, 1, 0, ""),
+    },
+    0x129: {
+        "SteeringAngle": (16, 14, 0.1, -819.2, "deg"),
+        "SteeringSpeed": (32, 14, 0.5, -4096, "d/s"),
+    },
+    0x132: {
+        "HVBatt_SOC_raw": (0, 10, 0.1, 0, "%"),
+    },
+    0x252: {
+        "BMS_packVoltage": (0, 16, 0.01, 0, "V"),
+    },
+    0x261: {
+        "DI_elecPower": (0, 11, 0.5, -512, "kW"),
+    },
+    0x292: {
+        "BMS_packCurrent": (0, 16, 0.1, -1000, "A"),
+    },
+    0x2B3: {
+        "EPAS_steeringAngle": (0, 16, 0.1, -819.2, "deg"),
+    },
+    0x318: {
+        "ESP_vehicleSpeed": (12, 12, 0.05, 0, "km/h"),
+    },
+    0x334: {
+        "UI_pedalMap": (5, 2, 1, 0, ""),
+    },
+    0x388: {"WheelSpeed_FL": (0, 16, 0.01, 0, "km/h")},
+    0x389: {"WheelSpeed_FR": (0, 16, 0.01, 0, "km/h")},
+    0x38A: {"WheelSpeed_RL": (0, 16, 0.01, 0, "km/h")},
+    0x38B: {"WheelSpeed_RR": (0, 16, 0.01, 0, "km/h")},
+    0x201: {
+        "BMS_packTempMax": (0, 8, 0.5, -40, "C"),
+        "BMS_packTempMin": (8, 8, 0.5, -40, "C"),
+    },
+    0x2E1: {
+        "VCLEFT_frontDoorState": (0, 2, 1, 0, ""),
+        "VCLEFT_rearDoorState": (2, 2, 1, 0, ""),
+    },
+    0x3F5: {"AmbientTemp": (0, 8, 0.5, -40, "C")},
+    0x376: {
+        "DI_inverterTemp": (0, 8, 1, -40, "C"),
+        "DI_statorTemp": (8, 8, 1, -40, "C"),
+    },
+    0x293: {"UI_steeringTuneRequest": (0, 2, 1, 0, "")},
+}
+
+PEDAL_MAP_NAMES = {0: "Chill", 1: "Standard", 2: "Performance"}
+BRAKE_STATE_NAMES = {0: "OFF", 1: "ON", 2: "INVALID"}
+
+
+def extract_le(data_bytes, start_bit, bit_length, scale, offset):
+    try:
+        byte_vals = [int(b, 16) for b in data_bytes]
+        while len(byte_vals) < 8:
+            byte_vals.append(0)
+        raw_val = 0
+        for i, bv in enumerate(byte_vals):
+            raw_val |= (bv << (i * 8))
+        mask = (1 << bit_length) - 1
+        extracted = (raw_val >> start_bit) & mask
+        return round(extracted * scale + offset, 3)
+    except (ValueError, IndexError):
+        return None
+
+
+def parse_frame(line):
+    line = line.strip()
+    if not line or line.startswith(">") or line.startswith("#"):
+        return None, None
+    if any(x in line for x in ["STOPPED", "ERROR", "BUFFER", "SEARCHING", "NO DATA"]):
+        return None, None
+    parts = line.split()
+    if len(parts) < 2:
+        return None, None
+    cid = parts[0].upper()
+    if not all(c in "0123456789ABCDEF" for c in cid) or len(cid) > 8:
+        return None, None
+    try:
+        return int(cid, 16), parts[1:]
+    except ValueError:
+        return None, None
+
+
+class Ghost3D:
+    def __init__(self, port):
+        self.port = port
+        self.ser = None
+        self.connected = False
+        self.lock = threading.Lock()
+
+        # CAN read state
+        self.state = {}
+        self.frame_count = 0
+        self.unique_ids = set()
+        self.start_time = None
+
+        # Ghost mode state
+        self.ghost_mode = None
+        self.inject_count = 0
+        self.ghost_start = None
+
+        # Logging
+        self.log_file = None
+
+    def connect(self):
+        try:
+            self.ser = serial.Serial(self.port, DEFAULT_BAUD, timeout=1)
+            time.sleep(0.5)
+            for cmd, wait in [("ATZ", 2), ("ATE0", 0.5), ("ATH1", 0.5),
+                              ("ATSP6", 0.5), ("ATCAF0", 0.5)]:
+                self.ser.write((cmd + "\r").encode())
+                time.sleep(wait)
+                self.ser.read(self.ser.in_waiting)
+            self.connected = True
+            self.start_time = time.time()
+            print(f"Connected to {self.port}")
+        except Exception as e:
+            print(f"Connection failed: {e}")
+            self.connected = False
+
+    def start_log(self):
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        os.makedirs("captures", exist_ok=True)
+        path = f"captures/ghost3d_{ts}.log"
+        self.log_file = open(path, "w")
+        self.log_file.write(f"# Ghost3D Recording - {datetime.now().isoformat()}\n\n")
+        print(f"Logging to {path}")
+
+    def set_ghost(self, mode):
+        if mode == "off" or mode is None:
+            self.ghost_mode = None
+            self.inject_count = 0
+            self.ghost_start = None
+            print("Ghost mode OFF")
+        elif mode in MODE_BYTES:
+            self.ghost_mode = mode
+            self.inject_count = 0
+            self.ghost_start = time.time()
+            print(f"Ghost mode: {mode.upper()}")
+
+    def honk(self):
+        if not self.connected:
+            return
+        with self.lock:
+            try:
+                self.ser.write(b"ATSH 273\r")
+                time.sleep(0.1)
+                self.ser.read(self.ser.in_waiting)
+                self.ser.write(b"00 00 00 00 00 00 00 20\r")
+                time.sleep(0.2)
+                self.ser.read(self.ser.in_waiting)
+            except Exception:
+                pass
+
+    def _inject_ghost(self):
+        if self.ghost_mode is None or not self.connected:
+            return
+        mode_byte = MODE_BYTES[self.ghost_mode]
+        counter = self.inject_count % 256
+        b7 = (counter * 16) & 0xFF
+        b8 = (counter * 4) & 0xFF
+        try:
+            self.ser.write(b"ATSH 334\r")
+            time.sleep(0.02)
+            self.ser.read(self.ser.in_waiting)
+            frame = f"{mode_byte:02X} 3F 14 80 FC 07 {b7:02X} {b8:02X}"
+            self.ser.write((frame + "\r").encode())
+            time.sleep(0.02)
+            self.ser.read(self.ser.in_waiting)
+            self.inject_count += 1
+        except Exception:
+            pass
+
+    def _read_burst(self, duration=0.3):
+        """Read CAN data for a short burst."""
+        if not self.connected:
+            return
+        try:
+            self.ser.write(b"STMA\r")
+            time.sleep(0.01)
+            end = time.time() + duration
+            while time.time() < end:
+                if self.ser.in_waiting:
+                    line = self.ser.readline().decode(errors="ignore").strip()
+                    can_id, data = parse_frame(line)
+                    if can_id is not None and data is not None:
+                        self.frame_count += 1
+                        self.unique_ids.add(can_id)
+                        elapsed = time.time() - self.start_time
+
+                        # Log raw frame
+                        if self.log_file:
+                            self.log_file.write(f"{elapsed:.4f} {can_id:03X} {' '.join(data)}\n")
+
+                        # Decode known signals
+                        if can_id in SIGNALS:
+                            with self.lock:
+                                for sig_name, params in SIGNALS[can_id].items():
+                                    start, length, scale, offset, unit = params
+                                    val = extract_le(data, start, length, scale, offset)
+                                    if val is not None:
+                                        display = val
+                                        if sig_name == "UI_pedalMap":
+                                            display = PEDAL_MAP_NAMES.get(int(val), val)
+                                        elif sig_name == "DI_brakePedalState":
+                                            display = BRAKE_STATE_NAMES.get(int(val), val)
+                                        self.state[sig_name] = {
+                                            "value": val,
+                                            "display": str(display),
+                                            "unit": unit,
+                                            "can_id": f"{can_id:03X}",
+                                            "time": time.time(),
+                                        }
+                else:
+                    time.sleep(0.005)
+            # Stop monitor
+            self.ser.write(b"\r")
+            time.sleep(0.05)
+            self.ser.read(self.ser.in_waiting)
+        except serial.SerialException:
+            self.connected = False
+        except Exception:
+            pass
+
+    def run_loop(self):
+        """Main loop: alternates between reading CAN and injecting ghost mode."""
+        self.start_log()
+        print("Main loop started. Reading CAN + injecting ghost mode.\n")
+
+        while True:
+            try:
+                if not self.connected:
+                    time.sleep(1)
+                    try:
+                        self.ser = serial.Serial(self.port, DEFAULT_BAUD, timeout=1)
+                        time.sleep(0.5)
+                        for cmd, wait in [("ATZ", 2), ("ATE0", 0.5), ("ATH1", 0.5),
+                                          ("ATSP6", 0.5), ("ATCAF0", 0.5)]:
+                            self.ser.write((cmd + "\r").encode())
+                            time.sleep(wait)
+                            self.ser.read(self.ser.in_waiting)
+                        self.connected = True
+                        print("Reconnected.")
+                    except Exception:
+                        continue
+
+                # Read burst
+                self._read_burst(0.3)
+
+                # Inject ghost if active
+                if self.ghost_mode is not None:
+                    with self.lock:
+                        self._inject_ghost()
+
+                # Flush log periodically
+                if self.log_file and self.frame_count % 500 == 0:
+                    self.log_file.flush()
+
+            except Exception as e:
+                print(f"Loop error: {e}")
+                time.sleep(0.5)
+
+    def get_state(self):
+        with self.lock:
+            uptime = time.time() - self.start_time if self.start_time else 0
+            fps = self.frame_count / uptime if uptime > 0 else 0
+            ghost_uptime = int(time.time() - self.ghost_start) if self.ghost_start and self.ghost_mode else 0
+            return {
+                "signals": dict(self.state),
+                "frame_count": self.frame_count,
+                "unique_ids": len(self.unique_ids),
+                "uptime": round(uptime, 1),
+                "fps": round(fps, 1),
+                "connected": self.connected,
+                "ghost_mode": self.ghost_mode,
+                "inject_count": self.inject_count,
+                "ghost_uptime": ghost_uptime,
+                "inject_rate": round(self.inject_count / ghost_uptime, 1) if ghost_uptime > 0 else 0,
+            }
+
+
+class Handler(BaseHTTPRequestHandler):
+    controller = None
+
+    def do_GET(self):
+        if self.path == "/api/state":
+            state = self.controller.get_state()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(json.dumps(state).encode())
+        elif self.path == "/" or self.path == "/index.html":
+            self._serve_file("performance_dash.html")
+        elif self.path.startswith("/"):
+            fname = self.path.lstrip("/")
+            fpath = Path(__file__).parent / fname
+            if fpath.exists():
+                self._serve_file(fname)
+            else:
+                self.send_response(404)
+                self.end_headers()
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def _serve_file(self, filename):
+        fpath = Path(__file__).parent / filename
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.end_headers()
+        self.wfile.write(fpath.read_bytes())
+
+    def do_POST(self):
+        if self.path == "/api/mode":
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length)) if length else {}
+            mode = body.get("mode", "off")
+            self.controller.set_ghost(mode)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(self.controller.get_state()).encode())
+        elif self.path == "/api/honk":
+            self.controller.honk()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"ok":true}')
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, format, *args):
+        pass
+
+
+def find_port():
+    for p in serial.tools.list_ports.comports():
+        if any(x in p.description.upper() for x in ["OBD", "STN", "ELM", "BLUETOOTH", "STANDARD SERIAL"]):
+            return p.device
+    return None
+
+
+def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="Ghost3D - Tesla Performance Controller")
+    parser.add_argument("--port", "-p", help="Serial port")
+    parser.add_argument("--http", type=int, default=HTTP_PORT)
+    args = parser.parse_args()
+
+    port = args.port or find_port()
+    if not port:
+        print("No OBDLink adapter found!")
+        sys.exit(1)
+
+    g = Ghost3D(port)
+    g.connect()
+
+    # Start CAN read/write loop
+    threading.Thread(target=g.run_loop, daemon=True).start()
+
+    # Start HTTP server
+    Handler.controller = g
+    httpd = HTTPServer(("0.0.0.0", args.http), Handler)
+    print(f"\n{'='*50}")
+    print(f"  GHOST3D Tesla Performance Controller")
+    print(f"  http://localhost:{args.http}")
+    print(f"{'='*50}\n")
+
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        g.set_ghost(None)
+        if g.log_file:
+            g.log_file.close()
+        httpd.shutdown()
+        print("Stopped.")
+
+
+if __name__ == "__main__":
+    main()

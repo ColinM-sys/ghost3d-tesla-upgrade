@@ -321,6 +321,12 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self.send_header("Content-Type", "text/html")
             self.end_headers()
             self.wfile.write(dashboard_path.read_bytes())
+        elif self.path == "/performance" or self.path == "/performance_dash.html":
+            perf_path = Path(__file__).parent / "performance_dash.html"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(perf_path.read_bytes())
         else:
             self.send_response(404)
             self.end_headers()
