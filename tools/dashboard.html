@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tesla Model 3 CAN Dashboard</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+    background: #0a0a0f;
+    color: #e0e0e0;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    padding: 20px;
+}
+h1 {
+    text-align: center;
+    color: #00d4ff;
+    margin-bottom: 5px;
+    font-size: 24px;
+    letter-spacing: 2px;
+}
+.subtitle {
+    text-align: center;
+    color: #666;
+    margin-bottom: 20px;
+    font-size: 13px;
+}
+.status-bar {
+    display: flex;
+    justify-content: center;
+    gap: 30px;
+    margin-bottom: 20px;
+    padding: 10px;
+    background: #111118;
+    border-radius: 8px;
+    border: 1px solid #222;
+}
+.status-item {
+    text-align: center;
+}
+.status-label {
+    font-size: 11px;
+    color: #888;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+.status-value {
+    font-size: 18px;
+    color: #00d4ff;
+    font-weight: bold;
+    font-family: 'Consolas', monospace;
+}
+.status-value.connected { color: #00ff88; }
+.status-value.disconnected { color: #ff4444; }
+
+.dashboard {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 15px;
+}
+.group {
+    background: #111118;
+    border-radius: 10px;
+    padding: 15px;
+    border: 1px solid #222;
+}
+.group-title {
+    color: #00d4ff;
+    font-size: 14px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-bottom: 12px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid #222;
+}
+.signal {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 6px 0;
+    border-bottom: 1px solid #1a1a22;
+}
+.signal:last-child { border-bottom: none; }
+.signal-name {
+    font-size: 13px;
+    color: #aaa;
+}
+.signal-value {
+    font-family: 'Consolas', monospace;
+    font-size: 16px;
+    font-weight: bold;
+    color: #fff;
+    transition: color 0.3s;
+}
+.signal-value.changed {
+    color: #00ff88;
+}
+.signal-unit {
+    font-size: 11px;
+    color: #666;
+    margin-left: 4px;
+}
+.signal-canid {
+    font-size: 10px;
+    color: #444;
+    margin-left: 8px;
+}
+
+/* Big hero gauges */
+.hero-section {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 15px;
+    margin-bottom: 15px;
+}
+.hero-gauge {
+    background: #111118;
+    border-radius: 12px;
+    padding: 20px;
+    text-align: center;
+    border: 1px solid #222;
+}
+.hero-label {
+    font-size: 12px;
+    color: #888;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-bottom: 5px;
+}
+.hero-value {
+    font-family: 'Consolas', monospace;
+    font-size: 48px;
+    font-weight: bold;
+    color: #fff;
+}
+.hero-value.speed { color: #00d4ff; }
+.hero-value.battery { color: #00ff88; }
+.hero-value.power { color: #ffaa00; }
+.hero-value.temp { color: #ff6644; }
+.hero-unit {
+    font-size: 14px;
+    color: #666;
+}
+
+/* Raw frames table */
+.raw-section {
+    margin-top: 15px;
+    background: #111118;
+    border-radius: 10px;
+    padding: 15px;
+    border: 1px solid #222;
+}
+.raw-title {
+    color: #00d4ff;
+    font-size: 14px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-bottom: 10px;
+    cursor: pointer;
+}
+.raw-table {
+    width: 100%;
+    font-family: 'Consolas', monospace;
+    font-size: 12px;
+    display: none;
+}
+.raw-table.visible { display: table; }
+.raw-table th {
+    text-align: left;
+    color: #888;
+    padding: 4px 8px;
+    border-bottom: 1px solid #333;
+}
+.raw-table td {
+    padding: 3px 8px;
+    color: #ccc;
+}
+.raw-table tr:hover td { background: #1a1a22; }
+</style>
+</head>
+<body>
+
+<h1>TESLA MODEL 3 CAN BUS</h1>
+<p class="subtitle">Real-time Vehicle Data Dashboard</p>
+
+<div class="status-bar">
+    <div class="status-item">
+        <div class="status-label">Connection</div>
+        <div class="status-value" id="conn-status">CONNECTING...</div>
+    </div>
+    <div class="status-item">
+        <div class="status-label">Frames</div>
+        <div class="status-value" id="frame-count">0</div>
+    </div>
+    <div class="status-item">
+        <div class="status-label">CAN IDs</div>
+        <div class="status-value" id="unique-ids">0</div>
+    </div>
+    <div class="status-item">
+        <div class="status-label">Update Rate</div>
+        <div class="status-value" id="update-rate">0 Hz</div>
+    </div>
+</div>
+
+<div class="hero-section">
+    <div class="hero-gauge">
+        <div class="hero-label">Speed</div>
+        <div class="hero-value speed" id="hero-speed">--</div>
+        <div class="hero-unit">km/h</div>
+    </div>
+    <div class="hero-gauge">
+        <div class="hero-label">Battery SOC</div>
+        <div class="hero-value battery" id="hero-soc">--</div>
+        <div class="hero-unit">%</div>
+    </div>
+    <div class="hero-gauge">
+        <div class="hero-label">Power</div>
+        <div class="hero-value power" id="hero-power">--</div>
+        <div class="hero-unit">kW</div>
+    </div>
+    <div class="hero-gauge">
+        <div class="hero-label">Pack Voltage</div>
+        <div class="hero-value temp" id="hero-voltage">--</div>
+        <div class="hero-unit">V</div>
+    </div>
+</div>
+
+<div class="dashboard" id="dashboard"></div>
+
+<div class="raw-section">
+    <div class="raw-title" onclick="toggleRaw()">Raw CAN Frames (click to expand)</div>
+    <table class="raw-table" id="raw-table">
+        <thead><tr><th>CAN ID</th><th>Data</th><th>Age</th></tr></thead>
+        <tbody id="raw-body"></tbody>
+    </table>
+</div>
+
+<script>
+const SIGNAL_GROUPS = {
+    "Speed & Motion": [
+        "ESP_vehicleSpeed", "SteeringAngle", "SteeringSpeed",
+        "EPAS_steeringAngle",
+        "WheelSpeed_FL", "WheelSpeed_FR", "WheelSpeed_RL", "WheelSpeed_RR"
+    ],
+    "Driver Inputs": [
+        "DI_accelPedalPos", "DI_brakePedalState"
+    ],
+    "Battery": [
+        "HVBatt_SOC_raw", "BMS_packVoltage", "BMS_packCurrent",
+        "BMS_kwhChargeTotal", "BMS_kwhDischargeTotal",
+        "BMS_packTempMax", "BMS_packTempMin"
+    ],
+    "Temperature": ["AmbientTemp", "DI_inverterTemp", "DI_statorTemp"],
+    "Power & Mode": ["DI_elecPower", "UI_pedalMap", "UI_steeringTuneRequest"],
+    "Body": ["VCLEFT_frontDoorState", "VCLEFT_rearDoorState",
+             "VCRIGHT_frontDoorState", "VCRIGHT_rearDoorState"],
+    "Control": ["UI_powertrainControl"],
+};
+
+let prevValues = {};
+let lastUpdate = Date.now();
+let updateCount = 0;
+
+function buildDashboard() {
+    const container = document.getElementById("dashboard");
+    for (const [groupName, signals] of Object.entries(SIGNAL_GROUPS)) {
+        const group = document.createElement("div");
+        group.className = "group";
+        group.innerHTML = `<div class="group-title">${groupName}</div>`;
+        for (const sig of signals) {
+            const row = document.createElement("div");
+            row.className = "signal";
+            row.innerHTML = `
+                <span class="signal-name">${sig}</span>
+                <span>
+                    <span class="signal-value" id="sig-${sig}">--</span>
+                    <span class="signal-unit" id="unit-${sig}"></span>
+                    <span class="signal-canid" id="canid-${sig}"></span>
+                </span>
+            `;
+            group.appendChild(row);
+        }
+        container.appendChild(group);
+    }
+}
+
+function updateDashboard(data) {
+    const signals = data.signals || {};
+    const now = Date.now();
+
+    // Update status bar
+    document.getElementById("frame-count").textContent = data.frame_count || 0;
+    document.getElementById("unique-ids").textContent = data.unique_ids || 0;
+
+    updateCount++;
+    if (now - lastUpdate > 1000) {
+        const hz = Math.round(updateCount / ((now - lastUpdate) / 1000));
+        document.getElementById("update-rate").textContent = hz + " Hz";
+        updateCount = 0;
+        lastUpdate = now;
+    }
+
+    // Update hero gauges
+    if (signals.ESP_vehicleSpeed) {
+        document.getElementById("hero-speed").textContent =
+            Math.round(signals.ESP_vehicleSpeed.value);
+    }
+    if (signals.HVBatt_SOC) {
+        document.getElementById("hero-soc").textContent =
+            signals.HVBatt_SOC.value.toFixed(1);
+    }
+    if (signals.DI_elecPower) {
+        document.getElementById("hero-power").textContent =
+            signals.DI_elecPower.value.toFixed(1);
+    }
+    if (signals.HVBatt_packVoltage) {
+        document.getElementById("hero-voltage").textContent =
+            signals.HVBatt_packVoltage.value.toFixed(1);
+    }
+
+    // Update all signals
+    for (const [name, info] of Object.entries(signals)) {
+        const el = document.getElementById("sig-" + name);
+        if (el) {
+            const displayVal = info.display || info.value;
+            const val = typeof displayVal === "number" ?
+                (Math.abs(displayVal) >= 100 ? displayVal.toFixed(1) : displayVal.toFixed(2)) :
+                displayVal;
+            el.textContent = val;
+
+            // Flash green on change
+            if (prevValues[name] !== undefined && prevValues[name] !== info.value) {
+                el.classList.add("changed");
+                setTimeout(() => el.classList.remove("changed"), 500);
+            }
+            prevValues[name] = info.value;
+
+            const unitEl = document.getElementById("unit-" + name);
+            if (unitEl) unitEl.textContent = info.unit || "";
+            const canidEl = document.getElementById("canid-" + name);
+            if (canidEl) canidEl.textContent = "0x" + info.can_id;
+        }
+    }
+}
+
+function toggleRaw() {
+    document.getElementById("raw-table").classList.toggle("visible");
+}
+
+let pollErrors = 0;
+
+async function poll() {
+    try {
+        const resp = await fetch("/api/state");
+        if (resp.ok) {
+            const data = await resp.json();
+            updateDashboard(data);
+            const statusEl = document.getElementById("conn-status");
+            statusEl.textContent = "LIVE";
+            statusEl.className = "status-value connected";
+            pollErrors = 0;
+        }
+    } catch (e) {
+        pollErrors++;
+        const statusEl = document.getElementById("conn-status");
+        if (pollErrors > 3) {
+            statusEl.textContent = "DISCONNECTED";
+            statusEl.className = "status-value disconnected";
+        }
+    }
+}
+
+buildDashboard();
+setInterval(poll, 200);  // 5 Hz polling
+</script>
+</body>
+</html>
