@@ -212,8 +212,12 @@ body {
             <button onclick="setGhost('standard')" style="padding:10px 20px; background:#333; color:white; border:1px solid #555; border-radius:8px; cursor:pointer; font-size:14px;">STANDARD</button>
             <button onclick="setGhost('chill')" style="padding:10px 20px; background:#0066aa; color:white; border:none; border-radius:8px; cursor:pointer; font-size:14px;">CHILL</button>
             <button onclick="setGhost('off')" style="padding:10px 20px; background:#1a1a22; color:#888; border:1px solid #333; border-radius:8px; cursor:pointer; font-size:14px;">OFF</button>
+            <div style="width:2px; height:30px; background:#333;"></div>
+            <button id="drift-btn" onclick="toggleDrift()" style="padding:10px 20px; background:linear-gradient(135deg,#8800aa,#cc44ff); color:white; border:none; border-radius:8px; cursor:pointer; font-weight:bold; font-size:14px;">DRIFT MODE</button>
+            <button id="colin-btn" onclick="colinMode()" style="padding:10px 20px; background:linear-gradient(135deg,#ff6600,#ffaa00); color:white; border:none; border-radius:8px; cursor:pointer; font-weight:bold; font-size:14px;">COLIN MODE</button>
             <button onclick="honk()" style="padding:10px 20px; background:#aa8800; color:white; border:none; border-radius:8px; cursor:pointer; font-size:14px;">HONK</button>
             <div style="font-family:Consolas; font-size:12px; color:#555;">Injected: <span id="inject-ct">0</span></div>
+            <div style="font-family:Consolas; font-size:12px;" id="drift-status"></div>
         </div>
     </div>
 
@@ -358,6 +362,34 @@ async function setGhost(mode) {
 
 async function honk() {
     try { await fetch('/api/honk', {method: 'POST'}); } catch(e) {}
+}
+
+let driftActive = false;
+async function toggleDrift() {
+    driftActive = !driftActive;
+    try {
+        await fetch('/api/drift', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({enabled: driftActive})
+        });
+    } catch(e) {}
+}
+
+async function colinMode() {
+    // COLIN MODE: Performance + Dyno (TC off) + Slip Start — maximum everything
+    try {
+        await fetch('/api/mode', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({mode: 'performance'})
+        });
+        await fetch('/api/drift', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({enabled: true})
+        });
+    } catch(e) {}
 }
 
 // G-Force canvas setup
@@ -633,7 +665,11 @@ async function poll() {
         // Ghost mode status
         const ghostEl = document.getElementById('ghost-indicator');
         const gm = data.ghost_mode;
-        if (gm) {
+        const dm = data.drift_mode;
+        if (dm) {
+            ghostEl.textContent = 'DRIFT MODE';
+            ghostEl.style.color = '#cc44ff';
+        } else if (gm) {
             ghostEl.textContent = gm.toUpperCase();
             ghostEl.style.color = gm === 'performance' ? '#ff4444' : gm === 'chill' ? '#00aaff' : '#ffffff';
         } else {
@@ -641,6 +677,16 @@ async function poll() {
             ghostEl.style.color = '#666';
         }
         document.getElementById('inject-ct').textContent = data.inject_count || 0;
+
+        // Drift button state
+        driftActive = dm || false;
+        const driftBtn = document.getElementById('drift-btn');
+        driftBtn.style.background = driftActive ? '#ff0066' : 'linear-gradient(135deg,#8800aa,#cc44ff)';
+        driftBtn.textContent = driftActive ? 'DRIFT ON' : 'DRIFT MODE';
+
+        const driftStatus = document.getElementById('drift-status');
+        driftStatus.textContent = data.tc_mode && data.tc_mode !== 'normal' ? 'TC: ' + data.tc_mode.toUpperCase() : '';
+        driftStatus.style.color = '#cc44ff';
 
     } catch(e) {
         document.getElementById('conn-dot').className = 'conn-dot dead';

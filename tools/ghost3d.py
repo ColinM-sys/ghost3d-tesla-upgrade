@@ -27,6 +27,19 @@ MODE_BYTES = {
     "performance": 0xDF,
 }
 
+# Traction control modes for CAN ID 0x293 (659 decimal)
+# UI_tractionControlMode: bit 2, 3 bits
+# Also UI_trackStabilityAssist: bit 16, 8 bits (0-100%, scale 0.5)
+TC_MODES = {
+    "normal": 0,
+    "slip_start": 1,
+    "dev1": 2,
+    "dev2": 3,
+    "rolls": 4,
+    "dyno": 5,       # Full TC off — drift mode
+    "offroad": 6,
+}
+
 SIGNALS = {
     0x118: {
         "DI_accelPedalPos": (32, 8, 0.4, 0, "%"),
@@ -132,6 +145,10 @@ class Ghost3D:
         self.inject_count = 0
         self.ghost_start = None
 
+        # Drift mode state
+        self.drift_mode = False
+        self.tc_mode = "normal"
+
         # Logging
         self.log_file = None
 
@@ -171,6 +188,23 @@ class Ghost3D:
             self.ghost_start = time.time()
             print(f"Ghost mode: {mode.upper()}")
 
+    def set_drift(self, enabled):
+        self.drift_mode = enabled
+        if enabled:
+            self.ghost_mode = "performance"
+            self.tc_mode = "dyno"
+            self.ghost_start = time.time() if not self.ghost_start else self.ghost_start
+            print("DRIFT MODE ON — Performance + TC Off")
+        else:
+            self.tc_mode = "normal"
+            # Don't turn off ghost mode — let user control that separately
+            print("DRIFT MODE OFF — TC restored")
+
+    def set_tc(self, mode):
+        if mode in TC_MODES:
+            self.tc_mode = mode
+            print(f"Traction control: {mode.upper()}")
+
     def honk(self):
         if not self.connected:
             return
@@ -186,20 +220,47 @@ class Ghost3D:
                 pass
 
     def _inject_ghost(self):
-        if self.ghost_mode is None or not self.connected:
+        if not self.connected:
             return
-        mode_byte = MODE_BYTES[self.ghost_mode]
-        counter = self.inject_count % 256
-        b7 = (counter * 16) & 0xFF
-        b8 = (counter * 4) & 0xFF
+        has_ghost = self.ghost_mode is not None
+        has_tc = self.tc_mode != "normal"
+
+        if not has_ghost and not has_tc:
+            return
+
         try:
-            self.ser.write(b"ATSH 334\r")
-            time.sleep(0.02)
-            self.ser.read(self.ser.in_waiting)
-            frame = f"{mode_byte:02X} 3F 14 80 FC 07 {b7:02X} {b8:02X}"
-            self.ser.write((frame + "\r").encode())
-            time.sleep(0.02)
-            self.ser.read(self.ser.in_waiting)
+            counter = self.inject_count % 256
+            b7 = (counter * 16) & 0xFF
+            b8 = (counter * 4) & 0xFF
+
+            # Inject pedal map (ghost mode)
+            if has_ghost:
+                mode_byte = MODE_BYTES[self.ghost_mode]
+                self.ser.write(b"ATSH 334\r")
+                time.sleep(0.02)
+                self.ser.read(self.ser.in_waiting)
+                frame = f"{mode_byte:02X} 3F 14 80 FC 07 {b7:02X} {b8:02X}"
+                self.ser.write((frame + "\r").encode())
+                time.sleep(0.02)
+                self.ser.read(self.ser.in_waiting)
+
+            # Inject traction control mode
+            if has_tc:
+                tc_val = TC_MODES[self.tc_mode]
+                # CAN ID 0x293 (659), UI_tractionControlMode: bit 2, 3 bits
+                # Byte 0 bits 2-4 = tc_val
+                tc_byte0 = (tc_val << 2) & 0xFF
+                # UI_trackStabilityAssist: bit 16, 8 bits, scale 0.5
+                # 0% = full off, 100% = full on. For drift: 0%
+                stability = 0 if self.drift_mode else 200  # 200 * 0.5 = 100%
+                self.ser.write(b"ATSH 293\r")
+                time.sleep(0.02)
+                self.ser.read(self.ser.in_waiting)
+                frame = f"{tc_byte0:02X} 00 {stability:02X} 00 00 00 {b7:02X} {b8:02X}"
+                self.ser.write((frame + "\r").encode())
+                time.sleep(0.02)
+                self.ser.read(self.ser.in_waiting)
+
             self.inject_count += 1
         except Exception:
             pass
@@ -309,6 +370,8 @@ class Ghost3D:
                 "inject_count": self.inject_count,
                 "ghost_uptime": ghost_uptime,
                 "inject_rate": round(self.inject_count / ghost_uptime, 1) if ghost_uptime > 0 else 0,
+                "drift_mode": self.drift_mode,
+                "tc_mode": self.tc_mode,
             }
 
 
@@ -360,6 +423,24 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(b'{"ok":true}')
+        elif self.path == "/api/drift":
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length)) if length else {}
+            enabled = body.get("enabled", False)
+            self.controller.set_drift(enabled)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(self.controller.get_state()).encode())
+        elif self.path == "/api/tc":
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length)) if length else {}
+            mode = body.get("mode", "normal")
+            self.controller.set_tc(mode)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(self.controller.get_state()).encode())
         else:
             self.send_response(404)
             self.end_headers()
