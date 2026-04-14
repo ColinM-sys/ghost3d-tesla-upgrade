@@ -149,6 +149,9 @@ class Ghost3D:
         self.drift_mode = False
         self.tc_mode = "normal"
 
+        # Colin mode state (max everything)
+        self.colin_mode = False
+
         # Logging
         self.log_file = None
 
@@ -181,7 +184,10 @@ class Ghost3D:
             self.ghost_mode = None
             self.inject_count = 0
             self.ghost_start = None
-            print("Ghost mode OFF")
+            self.drift_mode = False
+            self.colin_mode = False
+            self.tc_mode = "normal"
+            print("ALL MODES OFF")
         elif mode in MODE_BYTES:
             self.ghost_mode = mode
             self.inject_count = 0
@@ -199,6 +205,23 @@ class Ghost3D:
             self.tc_mode = "normal"
             # Don't turn off ghost mode — let user control that separately
             print("DRIFT MODE OFF — TC restored")
+
+    def set_colin(self, enabled):
+        self.colin_mode = enabled
+        if enabled:
+            self.ghost_mode = "performance"
+            self.tc_mode = "dyno"
+            self.drift_mode = True
+            self.ghost_start = time.time() if not self.ghost_start else self.ghost_start
+            print("COLIN MODE ACTIVATED — MAX POWER + TC OFF + TORQUE OVERRIDE")
+        else:
+            self.colin_mode = False
+            self.drift_mode = False
+            self.ghost_mode = None
+            self.tc_mode = "normal"
+            self.inject_count = 0
+            self.ghost_start = None
+            print("COLIN MODE OFF — all reverted")
 
     def set_tc(self, mode):
         if mode in TC_MODES:
@@ -247,16 +270,40 @@ class Ghost3D:
             # Inject traction control mode
             if has_tc:
                 tc_val = TC_MODES[self.tc_mode]
-                # CAN ID 0x293 (659), UI_tractionControlMode: bit 2, 3 bits
-                # Byte 0 bits 2-4 = tc_val
                 tc_byte0 = (tc_val << 2) & 0xFF
-                # UI_trackStabilityAssist: bit 16, 8 bits, scale 0.5
-                # 0% = full off, 100% = full on. For drift: 0%
-                stability = 0 if self.drift_mode else 200  # 200 * 0.5 = 100%
+                stability = 0 if self.drift_mode else 200
                 self.ser.write(b"ATSH 293\r")
                 time.sleep(0.02)
                 self.ser.read(self.ser.in_waiting)
                 frame = f"{tc_byte0:02X} 00 {stability:02X} 00 00 00 {b7:02X} {b8:02X}"
+                self.ser.write((frame + "\r").encode())
+                time.sleep(0.02)
+                self.ser.read(self.ser.in_waiting)
+
+            # Colin Mode: override power and torque limits
+            if self.colin_mode:
+                # UI_systemPowerLimit: CAN ID 0x334, bit 0, 5 bits, scale 20, offset 20
+                # Max value = 31 → 31*20+20 = 640 kW
+                # UI_systemTorqueLimit: bit 8, 6 bits, scale 100, offset 4000
+                # Max value = 63 → 63*100+4000 = 10300 Nm
+                # These are on the SAME CAN ID as pedalMap (0x334)
+                # So we need to combine them into one frame
+                # Pedal map is bit 5, 2 bits
+                # Power limit is bit 0, 5 bits = 31 (max)
+                # Torque limit is bit 8, 6 bits = 63 (max)
+                power_bits = 31  # max power: 640kW
+                torque_bits = 63  # max torque: 10300Nm
+                pedal_bits = 2   # performance
+
+                # Build byte 0: bits 0-4 = power (31), bits 5-6 = pedal (2)
+                byte0 = (power_bits & 0x1F) | ((pedal_bits & 0x03) << 5)
+                # Build byte 1: bits 0-5 = torque (63)
+                byte1 = torque_bits & 0x3F
+
+                self.ser.write(b"ATSH 334\r")
+                time.sleep(0.02)
+                self.ser.read(self.ser.in_waiting)
+                frame = f"{byte0:02X} {byte1:02X} 14 80 FC 07 {b7:02X} {b8:02X}"
                 self.ser.write((frame + "\r").encode())
                 time.sleep(0.02)
                 self.ser.read(self.ser.in_waiting)
@@ -372,6 +419,7 @@ class Ghost3D:
                 "inject_rate": round(self.inject_count / ghost_uptime, 1) if ghost_uptime > 0 else 0,
                 "drift_mode": self.drift_mode,
                 "tc_mode": self.tc_mode,
+                "colin_mode": self.colin_mode,
             }
 
 
@@ -428,6 +476,15 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(length)) if length else {}
             enabled = body.get("enabled", False)
             self.controller.set_drift(enabled)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(self.controller.get_state()).encode())
+        elif self.path == "/api/colin":
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length)) if length else {}
+            enabled = body.get("enabled", False)
+            self.controller.set_colin(enabled)
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()

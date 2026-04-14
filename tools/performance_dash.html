@@ -377,14 +377,31 @@ async function toggleDrift() {
 }
 
 async function colinMode() {
-    // COLIN MODE: Performance + Dyno (TC off) + Slip Start — maximum everything
+    const confirmed = confirm(
+        "⚠ COLIN MODE — MAXIMUM POWER ⚠\n\n" +
+        "This will:\n" +
+        "• Set Performance pedal map\n" +
+        "• Disable traction control\n" +
+        "• Disable stability control\n" +
+        "• Override power limit to MAX (640kW)\n" +
+        "• Override torque limit to MAX (10300Nm)\n\n" +
+        "WARNING: This pushes the motor and inverter beyond factory limits.\n" +
+        "Use only for short bursts. May cause overheating.\n" +
+        "Braking is NOT affected.\n\n" +
+        "Are you sure?"
+    );
+    if (!confirmed) return;
+
+    const confirmed2 = confirm(
+        "FINAL CONFIRMATION\n\n" +
+        "Colin Mode will activate immediately.\n" +
+        "Press OFF or close the app to deactivate.\n\n" +
+        "Proceed?"
+    );
+    if (!confirmed2) return;
+
     try {
-        await fetch('/api/mode', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({mode: 'performance'})
-        });
-        await fetch('/api/drift', {
+        await fetch('/api/colin', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({enabled: true})
@@ -666,10 +683,20 @@ async function poll() {
         const ghostEl = document.getElementById('ghost-indicator');
         const gm = data.ghost_mode;
         const dm = data.drift_mode;
-        if (dm) {
+        const cm = data.colin_mode;
+        if (cm) {
+            ghostEl.textContent = 'COLIN MODE';
+            ghostEl.style.color = '#ff6600';
+            document.getElementById('colin-btn').style.background = '#ff0000';
+            document.getElementById('colin-btn').textContent = 'COLIN ON';
+        } else {
+            document.getElementById('colin-btn').style.background = 'linear-gradient(135deg,#ff6600,#ffaa00)';
+            document.getElementById('colin-btn').textContent = 'COLIN MODE';
+        }
+        if (dm && !cm) {
             ghostEl.textContent = 'DRIFT MODE';
             ghostEl.style.color = '#cc44ff';
-        } else if (gm) {
+        } else if (!cm && gm) {
             ghostEl.textContent = gm.toUpperCase();
             ghostEl.style.color = gm === 'performance' ? '#ff4444' : gm === 'chill' ? '#00aaff' : '#ffffff';
         } else {
