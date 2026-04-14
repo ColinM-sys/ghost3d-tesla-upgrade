@@ -1,0 +1,550 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ghost3D Performance Dashboard</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+    background: #0a0a0f;
+    color: #e0e0e0;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    overflow: hidden;
+    height: 100vh;
+}
+.header {
+    text-align: center;
+    padding: 8px;
+    background: linear-gradient(180deg, #111118, #0a0a0f);
+}
+.header h1 { color: #00d4ff; font-size: 20px; letter-spacing: 3px; }
+
+.grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    grid-template-rows: 1fr 1fr;
+    gap: 8px;
+    padding: 8px;
+    height: calc(100vh - 50px);
+}
+.panel {
+    background: #111118;
+    border: 1px solid #222;
+    border-radius: 10px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 10px;
+    position: relative;
+}
+.panel-title {
+    position: absolute;
+    top: 8px;
+    left: 12px;
+    font-size: 11px;
+    color: #555;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+/* Speed Gauge */
+.speed-value {
+    font-family: 'Consolas', monospace;
+    font-size: 80px;
+    font-weight: bold;
+    color: #fff;
+    line-height: 1;
+}
+.speed-unit { font-size: 16px; color: #666; }
+.speed-kmh { font-size: 14px; color: #444; margin-top: 5px; }
+
+/* G-Force Circle */
+.gforce-container {
+    position: relative;
+    width: 200px;
+    height: 200px;
+}
+.gforce-canvas { width: 200px; height: 200px; }
+.gforce-values {
+    position: absolute;
+    bottom: -5px;
+    width: 100%;
+    display: flex;
+    justify-content: space-around;
+    font-family: 'Consolas', monospace;
+    font-size: 12px;
+}
+.gforce-lat { color: #00d4ff; }
+.gforce-lon { color: #ff4444; }
+.gforce-peak { color: #ffaa00; font-size: 11px; margin-top: 3px; }
+
+/* Pedal Bars */
+.pedal-container {
+    width: 100%;
+    max-width: 250px;
+}
+.pedal-row {
+    margin: 10px 0;
+}
+.pedal-label {
+    font-size: 12px;
+    color: #888;
+    margin-bottom: 4px;
+    display: flex;
+    justify-content: space-between;
+}
+.pedal-bar-bg {
+    height: 30px;
+    background: #1a1a22;
+    border-radius: 6px;
+    overflow: hidden;
+}
+.pedal-bar {
+    height: 100%;
+    border-radius: 6px;
+    transition: width 0.1s;
+}
+.pedal-bar.throttle { background: linear-gradient(90deg, #00aa44, #00ff66); }
+.pedal-bar.brake { background: linear-gradient(90deg, #aa0000, #ff4444); }
+.pedal-bar.regen { background: linear-gradient(90deg, #0066aa, #00aaff); }
+
+/* Steering Wheel */
+.steering-container {
+    position: relative;
+    width: 150px;
+    height: 150px;
+}
+.steering-canvas { width: 150px; height: 150px; }
+.steering-value {
+    text-align: center;
+    font-family: 'Consolas', monospace;
+    font-size: 18px;
+    color: #fff;
+    margin-top: 5px;
+}
+
+/* Timer */
+.timer-container { text-align: center; }
+.timer-value {
+    font-family: 'Consolas', monospace;
+    font-size: 56px;
+    font-weight: bold;
+    color: #ffaa00;
+}
+.timer-label { font-size: 14px; color: #888; margin-bottom: 5px; }
+.timer-status { font-size: 12px; color: #555; margin-top: 5px; }
+.timer-btn {
+    margin-top: 8px;
+    padding: 6px 16px;
+    background: #333;
+    color: #aaa;
+    border: 1px solid #555;
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 12px;
+}
+.timer-btn:hover { background: #444; }
+
+/* Power/Temps */
+.info-grid {
+    width: 100%;
+    padding: 0 10px;
+}
+.info-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 5px 0;
+    border-bottom: 1px solid #1a1a22;
+    font-size: 14px;
+}
+.info-label { color: #888; }
+.info-value {
+    font-family: 'Consolas', monospace;
+    font-weight: bold;
+    color: #fff;
+}
+.info-value.positive { color: #00ff66; }
+.info-value.negative { color: #ff4444; }
+.info-value.warn { color: #ffaa00; }
+
+/* Ghost Mode Status */
+.ghost-status {
+    position: absolute;
+    top: 8px;
+    right: 12px;
+    font-size: 11px;
+    font-weight: bold;
+    padding: 2px 8px;
+    border-radius: 4px;
+}
+.ghost-status.active { background: #ff4444; color: #fff; }
+.ghost-status.inactive { background: #333; color: #666; }
+
+/* Connection dot */
+.conn-dot {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+}
+.conn-dot.live { background: #00ff66; box-shadow: 0 0 6px #00ff66; }
+.conn-dot.dead { background: #ff4444; }
+</style>
+</head>
+<body>
+
+<div class="header">
+    <h1>GHOST3D PERFORMANCE</h1>
+    <div class="conn-dot dead" id="conn-dot"></div>
+</div>
+
+<div class="grid">
+    <!-- Speed -->
+    <div class="panel">
+        <div class="panel-title">Speed</div>
+        <div class="speed-value" id="speed-mph">0</div>
+        <div class="speed-unit">MPH</div>
+        <div class="speed-kmh" id="speed-kmh">0 km/h</div>
+    </div>
+
+    <!-- G-Force -->
+    <div class="panel">
+        <div class="panel-title">G-Force</div>
+        <div class="gforce-container">
+            <canvas class="gforce-canvas" id="gforce-canvas" width="200" height="200"></canvas>
+        </div>
+        <div class="gforce-values">
+            <span class="gforce-lat">LAT: <span id="g-lat">0.00</span>g</span>
+            <span class="gforce-lon">LON: <span id="g-lon">0.00</span>g</span>
+        </div>
+        <div class="gforce-peak">Peak: <span id="g-peak">0.00</span>g</div>
+    </div>
+
+    <!-- 0-60 Timer -->
+    <div class="panel">
+        <div class="panel-title">0-60 MPH</div>
+        <div class="timer-container">
+            <div class="timer-label">ACCELERATION TIMER</div>
+            <div class="timer-value" id="timer-value">-.--</div>
+            <div class="timer-status" id="timer-status">Waiting for launch...</div>
+            <button class="timer-btn" onclick="resetTimer()">RESET</button>
+            <div style="margin-top:10px; font-size:11px; color:#555;">
+                <div>0-30: <span id="t-030" style="color:#888">-.--</span>s</div>
+                <div>0-45: <span id="t-045" style="color:#888">-.--</span>s</div>
+                <div>30-60: <span id="t-3060" style="color:#888">-.--</span>s</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Pedals -->
+    <div class="panel">
+        <div class="panel-title">Driver Inputs</div>
+        <div class="pedal-container">
+            <div class="pedal-row">
+                <div class="pedal-label"><span>Throttle</span><span id="throttle-pct">0%</span></div>
+                <div class="pedal-bar-bg">
+                    <div class="pedal-bar throttle" id="throttle-bar" style="width:0%"></div>
+                </div>
+            </div>
+            <div class="pedal-row">
+                <div class="pedal-label"><span>Brake</span><span id="brake-pct">OFF</span></div>
+                <div class="pedal-bar-bg">
+                    <div class="pedal-bar brake" id="brake-bar" style="width:0%"></div>
+                </div>
+            </div>
+            <div class="pedal-row">
+                <div class="pedal-label"><span>Power</span><span id="power-val">0 kW</span></div>
+                <div class="pedal-bar-bg">
+                    <div class="pedal-bar regen" id="power-bar" style="width:0%"></div>
+                </div>
+            </div>
+        </div>
+        <div class="steering-value">Steer: <span id="steer-val">0.0</span>&deg;</div>
+    </div>
+
+    <!-- Vehicle Info -->
+    <div class="panel">
+        <div class="panel-title">Vehicle</div>
+        <div class="info-grid">
+            <div class="info-row">
+                <span class="info-label">Battery</span>
+                <span class="info-value" id="soc">--%</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Pack Voltage</span>
+                <span class="info-value" id="voltage">-- V</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Pack Current</span>
+                <span class="info-value" id="current">-- A</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Motor Temp</span>
+                <span class="info-value" id="motor-temp">--&deg;C</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Battery Temp</span>
+                <span class="info-value" id="batt-temp">--&deg;C</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Ambient</span>
+                <span class="info-value" id="ambient">--&deg;C</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Drive Mode</span>
+                <span class="info-value" id="drive-mode">--</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Wheel Speeds -->
+    <div class="panel">
+        <div class="panel-title">Wheel Speeds (km/h)</div>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px; width:100%; max-width:250px;">
+            <div style="text-align:center;">
+                <div style="color:#555; font-size:11px;">FRONT LEFT</div>
+                <div style="font-family:Consolas; font-size:24px; color:#fff;" id="wfl">--</div>
+            </div>
+            <div style="text-align:center;">
+                <div style="color:#555; font-size:11px;">FRONT RIGHT</div>
+                <div style="font-family:Consolas; font-size:24px; color:#fff;" id="wfr">--</div>
+            </div>
+            <div style="text-align:center;">
+                <div style="color:#555; font-size:11px;">REAR LEFT</div>
+                <div style="font-family:Consolas; font-size:24px; color:#fff;" id="wrl">--</div>
+            </div>
+            <div style="text-align:center;">
+                <div style="color:#555; font-size:11px;">REAR RIGHT</div>
+                <div style="font-family:Consolas; font-size:24px; color:#fff;" id="wrr">--</div>
+            </div>
+        </div>
+        <div style="margin-top:10px; text-align:center;">
+            <span style="color:#555; font-size:11px;">SLIP: </span>
+            <span style="font-family:Consolas; font-size:16px;" id="slip-val">0.0%</span>
+        </div>
+    </div>
+</div>
+
+<script>
+// G-Force canvas setup
+const gCanvas = document.getElementById('gforce-canvas');
+const gCtx = gCanvas.getContext('2d');
+let peakG = 0;
+let gHistory = [];
+
+// 0-60 timer state
+let timerState = 'waiting'; // waiting, running, done
+let timerStart = null;
+let t030 = null, t045 = null, t060 = null;
+let prevSpeed = 0;
+
+function drawGForce(latG, lonG) {
+    const cx = 100, cy = 100, radius = 85;
+    gCtx.clearRect(0, 0, 200, 200);
+
+    // Background circles
+    for (let r = 1; r <= 3; r++) {
+        const circR = (r / 3) * radius;
+        gCtx.beginPath();
+        gCtx.arc(cx, cy, circR, 0, Math.PI * 2);
+        gCtx.strokeStyle = '#1a1a22';
+        gCtx.lineWidth = 1;
+        gCtx.stroke();
+    }
+
+    // Crosshairs
+    gCtx.beginPath();
+    gCtx.moveTo(cx - radius, cy);
+    gCtx.lineTo(cx + radius, cy);
+    gCtx.moveTo(cx, cy - radius);
+    gCtx.lineTo(cx, cy + radius);
+    gCtx.strokeStyle = '#1a1a22';
+    gCtx.stroke();
+
+    // Labels
+    gCtx.fillStyle = '#333';
+    gCtx.font = '10px Consolas';
+    gCtx.fillText('1g', cx + radius/3 - 5, cy - 3);
+    gCtx.fillText('2g', cx + 2*radius/3 - 5, cy - 3);
+
+    // G-force trail
+    gHistory.push({lat: latG, lon: lonG});
+    if (gHistory.length > 30) gHistory.shift();
+
+    for (let i = 0; i < gHistory.length; i++) {
+        const alpha = (i / gHistory.length) * 0.4;
+        const px = cx + (gHistory[i].lat / 3) * radius;
+        const py = cy - (gHistory[i].lon / 3) * radius;
+        gCtx.beginPath();
+        gCtx.arc(px, py, 2, 0, Math.PI * 2);
+        gCtx.fillStyle = `rgba(0, 212, 255, ${alpha})`;
+        gCtx.fill();
+    }
+
+    // Current G-force dot
+    const gx = cx + (latG / 3) * radius;
+    const gy = cy - (lonG / 3) * radius;
+
+    gCtx.beginPath();
+    gCtx.arc(gx, gy, 6, 0, Math.PI * 2);
+    gCtx.fillStyle = '#00d4ff';
+    gCtx.shadowColor = '#00d4ff';
+    gCtx.shadowBlur = 15;
+    gCtx.fill();
+    gCtx.shadowBlur = 0;
+
+    // Peak
+    const totalG = Math.sqrt(latG * latG + lonG * lonG);
+    if (totalG > peakG) peakG = totalG;
+}
+
+function updateTimer(speedMph) {
+    if (timerState === 'waiting') {
+        if (speedMph > 1 && prevSpeed <= 1) {
+            timerState = 'running';
+            timerStart = Date.now();
+            document.getElementById('timer-status').textContent = 'LAUNCHING...';
+        }
+    }
+
+    if (timerState === 'running') {
+        const elapsed = (Date.now() - timerStart) / 1000;
+        document.getElementById('timer-value').textContent = elapsed.toFixed(2);
+
+        if (speedMph >= 30 && !t030) {
+            t030 = elapsed;
+            document.getElementById('t-030').textContent = t030.toFixed(2);
+        }
+        if (speedMph >= 45 && !t045) {
+            t045 = elapsed;
+            document.getElementById('t-045').textContent = t045.toFixed(2);
+        }
+        if (speedMph >= 60 && !t060) {
+            t060 = elapsed;
+            document.getElementById('timer-value').textContent = t060.toFixed(2);
+            document.getElementById('timer-status').textContent = 'DONE!';
+            if (t030) {
+                document.getElementById('t-3060').textContent = (t060 - t030).toFixed(2);
+            }
+            timerState = 'done';
+        }
+    }
+
+    prevSpeed = speedMph;
+}
+
+function resetTimer() {
+    timerState = 'waiting';
+    timerStart = null;
+    t030 = null; t045 = null; t060 = null;
+    prevSpeed = 0;
+    peakG = 0;
+    gHistory = [];
+    document.getElementById('timer-value').textContent = '-.--';
+    document.getElementById('timer-status').textContent = 'Waiting for launch...';
+    document.getElementById('t-030').textContent = '-.--';
+    document.getElementById('t-045').textContent = '-.--';
+    document.getElementById('t-3060').textContent = '-.--';
+    document.getElementById('g-peak').textContent = '0.00';
+}
+
+let lastFrameCount = 0;
+
+async function poll() {
+    try {
+        const resp = await fetch('/api/state');
+        const data = await resp.json();
+        const s = data.signals || {};
+
+        // Connection status
+        const dot = document.getElementById('conn-dot');
+        if (data.frame_count > lastFrameCount) {
+            dot.className = 'conn-dot live';
+            lastFrameCount = data.frame_count;
+        } else {
+            dot.className = 'conn-dot dead';
+        }
+
+        // Speed
+        const speedKmh = s.ESP_vehicleSpeed ? s.ESP_vehicleSpeed.value : 0;
+        const speedMph = speedKmh * 0.621371;
+        document.getElementById('speed-mph').textContent = Math.round(speedMph);
+        document.getElementById('speed-kmh').textContent = speedKmh.toFixed(1) + ' km/h';
+
+        // G-Force (calculated from speed change and lateral accel if available)
+        // For now estimate from speed delta
+        const latG = s.EPAS_steeringAngle ? Math.sin(s.EPAS_steeringAngle.value * Math.PI / 180) * speedKmh / 100 : 0;
+        const lonG = (speedKmh - (s._prevSpeed || 0)) / 9.81 / 0.2; // rough estimate
+        s._prevSpeed = speedKmh;
+        drawGForce(
+            Math.max(-3, Math.min(3, latG)),
+            Math.max(-3, Math.min(3, lonG))
+        );
+        document.getElementById('g-lat').textContent = Math.abs(latG).toFixed(2);
+        document.getElementById('g-lon').textContent = Math.abs(lonG).toFixed(2);
+        document.getElementById('g-peak').textContent = peakG.toFixed(2);
+
+        // Timer
+        updateTimer(speedMph);
+
+        // Pedals
+        const throttle = s.DI_accelPedalPos ? s.DI_accelPedalPos.value : 0;
+        document.getElementById('throttle-pct').textContent = throttle.toFixed(0) + '%';
+        document.getElementById('throttle-bar').style.width = throttle + '%';
+
+        const brakeState = s.DI_brakePedalState ? s.DI_brakePedalState.display : 'OFF';
+        document.getElementById('brake-pct').textContent = brakeState;
+        document.getElementById('brake-bar').style.width = brakeState === 'ON' ? '100%' : '0%';
+
+        const power = s.DI_elecPower ? s.DI_elecPower.value : 0;
+        document.getElementById('power-val').textContent = power.toFixed(0) + ' kW';
+        const powerPct = Math.min(100, Math.abs(power) / 3);
+        document.getElementById('power-bar').style.width = powerPct + '%';
+
+        // Steering
+        const steer = s.SteeringAngle ? s.SteeringAngle.value : 0;
+        document.getElementById('steer-val').textContent = steer.toFixed(1);
+
+        // Vehicle info
+        if (s.HVBatt_SOC_raw) document.getElementById('soc').textContent = s.HVBatt_SOC_raw.value.toFixed(1) + '%';
+        if (s.BMS_packVoltage) document.getElementById('voltage').textContent = s.BMS_packVoltage.value.toFixed(0) + ' V';
+        if (s.BMS_packCurrent) document.getElementById('current').textContent = s.BMS_packCurrent.value.toFixed(1) + ' A';
+        if (s.DI_statorTemp) document.getElementById('motor-temp').textContent = s.DI_statorTemp.value + '\u00B0C';
+        if (s.BMS_packTempMax) document.getElementById('batt-temp').textContent = s.BMS_packTempMax.value + '\u00B0C';
+        if (s.AmbientTemp) document.getElementById('ambient').textContent = s.AmbientTemp.value + '\u00B0C';
+        if (s.UI_pedalMap) document.getElementById('drive-mode').textContent = s.UI_pedalMap.display;
+
+        // Wheel speeds
+        if (s.WheelSpeed_FL) document.getElementById('wfl').textContent = s.WheelSpeed_FL.value.toFixed(1);
+        if (s.WheelSpeed_FR) document.getElementById('wfr').textContent = s.WheelSpeed_FR.value.toFixed(1);
+        if (s.WheelSpeed_RL) document.getElementById('wrl').textContent = s.WheelSpeed_RL.value.toFixed(1);
+        if (s.WheelSpeed_RR) document.getElementById('wrr').textContent = s.WheelSpeed_RR.value.toFixed(1);
+
+        // Wheel slip calculation
+        const fl = s.WheelSpeed_FL ? s.WheelSpeed_FL.value : 0;
+        const fr = s.WheelSpeed_FR ? s.WheelSpeed_FR.value : 0;
+        const rl = s.WheelSpeed_RL ? s.WheelSpeed_RL.value : 0;
+        const rr = s.WheelSpeed_RR ? s.WheelSpeed_RR.value : 0;
+        const frontAvg = (fl + fr) / 2;
+        const rearAvg = (rl + rr) / 2;
+        const slip = frontAvg > 0 ? ((rearAvg - frontAvg) / frontAvg * 100) : 0;
+        const slipEl = document.getElementById('slip-val');
+        slipEl.textContent = Math.abs(slip).toFixed(1) + '%';
+        slipEl.style.color = Math.abs(slip) > 5 ? '#ff4444' : Math.abs(slip) > 2 ? '#ffaa00' : '#00ff66';
+
+    } catch(e) {
+        document.getElementById('conn-dot').className = 'conn-dot dead';
+    }
+}
+
+// Draw initial g-force
+drawGForce(0, 0);
+
+setInterval(poll, 200);
+</script>
+</body>
+</html>
