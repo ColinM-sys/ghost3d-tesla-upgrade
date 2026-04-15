@@ -27,16 +27,13 @@ MODE_BYTES = {
     "performance": 0x7F,
 }
 
-# Traction control modes for CAN ID 0x293 (659 decimal)
-# UI_tractionControlMode: bit 2, 3 bits
-# Also UI_trackStabilityAssist: bit 16, 8 bits (0-100%, scale 0.5)
 TC_MODES = {
     "normal": 0,
     "slip_start": 1,
     "dev1": 2,
     "dev2": 3,
     "rolls": 4,
-    "dyno": 5,       # Full TC off — drift mode
+    "dyno": 5,
     "offroad": 6,
 }
 
@@ -68,7 +65,11 @@ SIGNALS = {
         "ESP_vehicleSpeed": (12, 12, 0.05, 0, "km/h"),
     },
     0x334: {
-        "UI_pedalMap": (5, 2, 1, 0, ""),
+        "UI_pedalMap": (7, 1, 1, 0, ""),
+    },
+    0x1D8: {
+        "RearTorqueRequest": (8, 13, 0.222, 0, "Nm"),
+        "RearTorqueActual": (21, 13, 0.222, 0, "Nm"),
     },
     0x388: {"WheelSpeed_FL": (0, 16, 0.01, 0, "km/h")},
     0x389: {"WheelSpeed_FR": (0, 16, 0.01, 0, "km/h")},
@@ -90,7 +91,7 @@ SIGNALS = {
     0x293: {"UI_steeringTuneRequest": (0, 2, 1, 0, "")},
 }
 
-PEDAL_MAP_NAMES = {0: "Chill", 1: "Standard", 2: "Performance"}
+PEDAL_MAP_NAMES = {0: "Chill", 1: "Standard"}
 BRAKE_STATE_NAMES = {0: "OFF", 1: "ON", 2: "INVALID"}
 
 
@@ -113,7 +114,7 @@ def parse_frame(line):
     line = line.strip()
     if not line or line.startswith(">") or line.startswith("#"):
         return None, None
-    if any(x in line for x in ["STOPPED", "ERROR", "BUFFER", "SEARCHING", "NO DATA"]):
+    if any(x in line for x in ["STOPPED", "ERROR", "BUFFER", "SEARCHING", "NO DATA", "OK", "ELM", "STN"]):
         return None, None
     parts = line.split()
     if len(parts) < 2:
@@ -127,44 +128,46 @@ def parse_frame(line):
         return None, None
 
 
+def calc_checksum_334(frame_bytes):
+    """Checksum for CAN ID 0x334: byte7 = (sum(bytes0-6) + 0x37) & 0xFF"""
+    return (sum(frame_bytes[:7]) + 0x37) & 0xFF
+
+
+def calc_checksum_1D8(frame_bytes):
+    """Checksum for CAN ID 0x1D8: byte7 = (sum(bytes0-6) + 0xD9) & 0xFF"""
+    return (sum(frame_bytes[:7]) + 0xD9) & 0xFF
+
+
 class Ghost3D:
     def __init__(self, port):
         self.port = port
         self.ser = None
         self.connected = False
         self.lock = threading.Lock()
-
-        # CAN read state
         self.state = {}
         self.frame_count = 0
         self.unique_ids = set()
         self.start_time = None
-
-        # Ghost mode state
         self.ghost_mode = None
         self.inject_count = 0
         self.ghost_start = None
-
-        # Drift mode state
         self.drift_mode = False
         self.tc_mode = "normal"
-
-        # Colin mode state (max everything)
         self.colin_mode = False
-
-        # Logging
         self.log_file = None
+        self._read_initialized = False
 
     def connect(self):
         try:
             self.ser = serial.Serial(self.port, DEFAULT_BAUD, timeout=1)
             time.sleep(0.5)
             for cmd, wait in [("ATZ", 2), ("ATE0", 0.5), ("ATH1", 0.5),
-                              ("ATSP6", 0.5), ("ATCAF0", 0.5)]:
+                              ("ATS1", 0.5), ("ATSP6", 0.5), ("ATCAF0", 0.5)]:
                 self.ser.write((cmd + "\r").encode())
                 time.sleep(wait)
                 self.ser.read(self.ser.in_waiting)
             self.connected = True
+            self._read_initialized = True
             self.start_time = time.time()
             print(f"Connected to {self.port}")
         except Exception as e:
@@ -200,11 +203,10 @@ class Ghost3D:
             self.ghost_mode = "performance"
             self.tc_mode = "dyno"
             self.ghost_start = time.time() if not self.ghost_start else self.ghost_start
-            print("DRIFT MODE ON — Performance + TC Off")
+            print("DRIFT MODE ON")
         else:
             self.tc_mode = "normal"
-            # Don't turn off ghost mode — let user control that separately
-            print("DRIFT MODE OFF — TC restored")
+            print("DRIFT MODE OFF")
 
     def set_colin(self, enabled):
         self.colin_mode = enabled
@@ -213,7 +215,7 @@ class Ghost3D:
             self.tc_mode = "dyno"
             self.drift_mode = True
             self.ghost_start = time.time() if not self.ghost_start else self.ghost_start
-            print("COLIN MODE ACTIVATED — MAX POWER + TC OFF + TORQUE OVERRIDE")
+            print("COLIN MODE ON")
         else:
             self.colin_mode = False
             self.drift_mode = False
@@ -221,12 +223,11 @@ class Ghost3D:
             self.tc_mode = "normal"
             self.inject_count = 0
             self.ghost_start = None
-            print("COLIN MODE OFF — all reverted")
+            print("COLIN MODE OFF")
 
     def set_tc(self, mode):
         if mode in TC_MODES:
             self.tc_mode = mode
-            print(f"Traction control: {mode.upper()}")
 
     def honk(self):
         if not self.connected:
@@ -239,109 +240,73 @@ class Ghost3D:
                 self.ser.write(b"00 00 00 00 00 00 00 20\r")
                 time.sleep(0.2)
                 self.ser.read(self.ser.in_waiting)
+                self._read_initialized = False
             except Exception:
                 pass
 
-    def _inject_ghost(self):
-        if not self.connected:
-            return
-        has_ghost = self.ghost_mode is not None
-        has_tc = self.tc_mode != "normal"
-
-        if not has_ghost and not has_tc:
-            return
-
+    def _init_for_read(self):
+        """Reinitialize adapter for reading after writing."""
         try:
-            counter = self.inject_count % 256
-            b7 = (counter * 16) & 0xFF
-            b8 = (counter * 4) & 0xFF
-
-            # Inject pedal map (ghost mode)
-            if has_ghost:
-                mode_byte = MODE_BYTES[self.ghost_mode]
-                self.ser.write(b"ATSH 334\r")
-                time.sleep(0.02)
-                self.ser.read(self.ser.in_waiting)
-                # Real frame: XX 3F 14 80 FC 07 [counter|4] [(counter+D)<<4]
-                # Byte 0: pedal map in bits 5-6
-                # Byte 6: high nibble = counter (0-15), low nibble = 4
-                # Byte 7: high nibble = (counter + 0xD) mod 16, low nibble = 0
-                cnt = counter & 0xF
-                chk6 = (cnt << 4) | 0x04
-                chk7 = (((cnt + 0xD) & 0xF) << 4)
-                frame = f"{mode_byte:02X} 3F 14 80 FC 07 {chk6:02X} {chk7:02X}"
-                self.ser.write((frame + "\r").encode())
-                time.sleep(0.02)
-                self.ser.read(self.ser.in_waiting)
-
-            # Inject traction control mode
-            if has_tc:
-                tc_val = TC_MODES[self.tc_mode]
-                tc_byte0 = (tc_val << 2) & 0xFF
-                stability = 0 if self.drift_mode else 200
-                self.ser.write(b"ATSH 293\r")
-                time.sleep(0.02)
-                self.ser.read(self.ser.in_waiting)
-                frame = f"{tc_byte0:02X} 00 {stability:02X} 00 00 00 {b7:02X} {b8:02X}"
-                self.ser.write((frame + "\r").encode())
-                time.sleep(0.02)
-                self.ser.read(self.ser.in_waiting)
-
-            # Colin Mode: override power and torque limits
-            if self.colin_mode:
-                # UI_systemPowerLimit: CAN ID 0x334, bit 0, 5 bits, scale 20, offset 20
-                # Max value = 31 → 31*20+20 = 640 kW
-                # UI_systemTorqueLimit: bit 8, 6 bits, scale 100, offset 4000
-                # Max value = 63 → 63*100+4000 = 10300 Nm
-                # These are on the SAME CAN ID as pedalMap (0x334)
-                # So we need to combine them into one frame
-                # Pedal map is bit 5, 2 bits
-                # Power limit is bit 0, 5 bits = 31 (max)
-                # Torque limit is bit 8, 6 bits = 63 (max)
-                power_bits = 31  # max power: 640kW
-                torque_bits = 63  # max torque: 10300Nm
-                pedal_bits = 2   # performance
-
-                # Build byte 0: bits 0-4 = power (31), bits 5-6 = pedal (2)
-                byte0 = (power_bits & 0x1F) | ((pedal_bits & 0x03) << 5)
-                # Build byte 1: bits 0-5 = torque (63)
-                byte1 = torque_bits & 0x3F
-
-                self.ser.write(b"ATSH 334\r")
-                time.sleep(0.02)
-                self.ser.read(self.ser.in_waiting)
-                frame = f"{byte0:02X} {byte1:02X} 14 80 FC 07 {b7:02X} {b8:02X}"
-                self.ser.write((frame + "\r").encode())
-                time.sleep(0.02)
-                self.ser.read(self.ser.in_waiting)
-
-            self.inject_count += 1
+            self.ser.write(b"ATH1\r")
+            time.sleep(0.03)
+            self.ser.read(self.ser.in_waiting)
+            self.ser.write(b"ATS1\r")
+            time.sleep(0.03)
+            self.ser.read(self.ser.in_waiting)
+            self._read_initialized = True
         except Exception:
             pass
 
-    def _read_burst(self, duration=0.15):
-        """Read CAN data for a short burst then cleanly stop."""
+    def _inject_one_334(self):
+        """Inject one pedal map frame with correct checksum."""
+        cnt = self.inject_count & 0xF
+        b6 = (cnt << 4) | 0x04
+        mode_byte = MODE_BYTES[self.ghost_mode]
+        frame_bytes = [mode_byte, 0x3F, 0x0A, 0x80, 0xFC, 0x07, b6]
+        b7 = calc_checksum_334(frame_bytes)
+        frame = " ".join(f"{b:02X}" for b in frame_bytes) + f" {b7:02X}"
+        self.ser.write(b"ATSH 334\r")
+        time.sleep(0.02)
+        self.ser.read(self.ser.in_waiting)
+        self.ser.write((frame + "\r").encode())
+        time.sleep(0.02)
+        self.ser.read(self.ser.in_waiting)
+        self.inject_count += 1
+        self._read_initialized = False
+
+    def _inject_one_1D8(self, torque_nm=0):
+        """Inject one torque request frame with correct checksum."""
+        cnt = self.inject_count & 0xF
+        b6 = (cnt << 4)
+        # Encode torque: RearTorqueRequest at bit 8, 13 bits, scale 0.222
+        raw_torque = int(torque_nm / 0.222) & 0x1FFF
+        # Byte 0 = flags (0x29 from car)
+        # Bytes 1-2: torque request encoded
+        b1 = (raw_torque << 0) & 0xFF
+        b2 = (raw_torque >> 8) & 0xFF
+        frame_bytes = [0x29, b1, b2, 0x00, 0x00, 0x00, b6]
+        b7 = calc_checksum_1D8(frame_bytes)
+        frame = " ".join(f"{b:02X}" for b in frame_bytes) + f" {b7:02X}"
+        self.ser.write(b"ATSH 1D8\r")
+        time.sleep(0.02)
+        self.ser.read(self.ser.in_waiting)
+        self.ser.write((frame + "\r").encode())
+        time.sleep(0.02)
+        self.ser.read(self.ser.in_waiting)
+        self._read_initialized = False
+
+    def _read_burst(self):
+        """Read CAN data for a short burst."""
         if not self.connected:
             return
         try:
-            # Reinit for reading
-            self.ser.write(b"ATSP6\r")
-            time.sleep(0.05)
-            self.ser.read(self.ser.in_waiting)
-            self.ser.write(b"ATCAF0\r")
-            time.sleep(0.05)
-            self.ser.read(self.ser.in_waiting)
-            self.ser.write(b"ATH1\r")
-            time.sleep(0.05)
-            self.ser.read(self.ser.in_waiting)
-            self.ser.write(b"ATS1\r")
-            time.sleep(0.05)
-            self.ser.read(self.ser.in_waiting)
+            if not self._read_initialized:
+                self._init_for_read()
 
-            # Start monitor
             self.ser.write(b"STMA\r")
             time.sleep(0.02)
-            end = time.time() + duration
+
+            end = time.time() + 0.15
             while time.time() < end:
                 if self.ser.in_waiting:
                     line = self.ser.readline().decode(errors="ignore").strip()
@@ -349,9 +314,9 @@ class Ghost3D:
                     if can_id is not None and data is not None:
                         self.frame_count += 1
                         self.unique_ids.add(can_id)
-                        elapsed = time.time() - self.start_time
 
                         if self.log_file:
+                            elapsed = time.time() - self.start_time
                             self.log_file.write(f"{elapsed:.4f} {can_id:03X} {' '.join(data)}\n")
 
                         if can_id in SIGNALS:
@@ -374,51 +339,46 @@ class Ghost3D:
                                         }
                 else:
                     time.sleep(0.005)
-            # Stop monitor and flush completely
+
+            # Stop monitor
             self.ser.write(b"\r")
-            time.sleep(0.15)
+            time.sleep(0.1)
             self.ser.read(self.ser.in_waiting)
-            time.sleep(0.05)
-            self.ser.read(self.ser.in_waiting)
+
         except serial.SerialException:
             self.connected = False
         except Exception as e:
             print(f"Read error: {e}")
 
     def run_loop(self):
-        """Main loop: alternates between reading CAN and injecting ghost mode."""
         self.start_log()
-        print("Main loop started. Reading CAN + injecting ghost mode.\n")
+        print("Main loop started.\n")
 
         while True:
             try:
                 if not self.connected:
                     time.sleep(1)
                     try:
-                        self.ser = serial.Serial(self.port, DEFAULT_BAUD, timeout=1)
-                        time.sleep(0.5)
-                        for cmd, wait in [("ATZ", 2), ("ATE0", 0.5), ("ATH1", 0.5),
-                                          ("ATSP6", 0.5), ("ATCAF0", 0.5)]:
-                            self.ser.write((cmd + "\r").encode())
-                            time.sleep(wait)
-                            self.ser.read(self.ser.in_waiting)
-                        self.connected = True
-                        print("Reconnected.")
+                        self.connect()
                     except Exception:
                         continue
 
-                # Always read a short burst
-                self._read_burst(0.2)
+                # Read burst
+                self._read_burst()
 
-                # Then inject if ghost mode active
-                if self.ghost_mode is not None or self.tc_mode != "normal":
+                # Inject if active
+                is_injecting = self.ghost_mode is not None or self.tc_mode != "normal"
+                if is_injecting:
                     with self.lock:
-                        self._inject_ghost()
-                        self._inject_ghost()
-                        self._inject_ghost()
+                        try:
+                            if self.ghost_mode is not None:
+                                self._inject_one_334()
+                            if self.colin_mode:
+                                self._inject_one_1D8(torque_nm=0)
+                        except Exception as e:
+                            print(f"Inject error: {e}")
 
-                # Flush log periodically
-                if self.log_file and self.frame_count % 500 == 0:
+                if self.log_file and self.frame_count % 500 == 0 and self.frame_count > 0:
                     self.log_file.flush()
 
             except Exception as e:
@@ -485,46 +445,34 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(length)) if length else {}
             mode = body.get("mode", "off")
             self.controller.set_ghost(mode)
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps(self.controller.get_state()).encode())
+            self._json_response(self.controller.get_state())
         elif self.path == "/api/honk":
             self.controller.honk()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(b'{"ok":true}')
+            self._json_response({"ok": True})
         elif self.path == "/api/drift":
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length)) if length else {}
-            enabled = body.get("enabled", False)
-            self.controller.set_drift(enabled)
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps(self.controller.get_state()).encode())
+            self.controller.set_drift(body.get("enabled", False))
+            self._json_response(self.controller.get_state())
         elif self.path == "/api/colin":
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length)) if length else {}
-            enabled = body.get("enabled", False)
-            self.controller.set_colin(enabled)
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps(self.controller.get_state()).encode())
+            self.controller.set_colin(body.get("enabled", False))
+            self._json_response(self.controller.get_state())
         elif self.path == "/api/tc":
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length)) if length else {}
-            mode = body.get("mode", "normal")
-            self.controller.set_tc(mode)
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps(self.controller.get_state()).encode())
+            self.controller.set_tc(body.get("mode", "normal"))
+            self._json_response(self.controller.get_state())
         else:
             self.send_response(404)
             self.end_headers()
+
+    def _json_response(self, data):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(data).encode())
 
     def log_message(self, format, *args):
         pass
@@ -539,7 +487,7 @@ def find_port():
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description="Ghost3D - Tesla Performance Controller")
+    parser = argparse.ArgumentParser(description="Ghost3D")
     parser.add_argument("--port", "-p", help="Serial port")
     parser.add_argument("--http", type=int, default=HTTP_PORT)
     args = parser.parse_args()
@@ -552,10 +500,8 @@ def main():
     g = Ghost3D(port)
     g.connect()
 
-    # Start CAN read/write loop
     threading.Thread(target=g.run_loop, daemon=True).start()
 
-    # Start HTTP server
     Handler.controller = g
     httpd = HTTPServer(("0.0.0.0", args.http), Handler)
     print(f"\n{'='*50}")
