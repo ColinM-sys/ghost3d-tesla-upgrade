@@ -22,9 +22,9 @@ DEFAULT_BAUD = 115200
 HTTP_PORT = 9090
 
 MODE_BYTES = {
-    "chill": 0x9F,
+    "chill": 0x3F,
     "standard": 0xBF,
-    "performance": 0xDF,
+    "performance": 0x7F,
 }
 
 # Traction control modes for CAN ID 0x293 (659 decimal)
@@ -262,7 +262,14 @@ class Ghost3D:
                 self.ser.write(b"ATSH 334\r")
                 time.sleep(0.02)
                 self.ser.read(self.ser.in_waiting)
-                frame = f"{mode_byte:02X} 3F 14 80 FC 07 {b7:02X} {b8:02X}"
+                # Real frame: XX 3F 14 80 FC 07 [counter|4] [(counter+D)<<4]
+                # Byte 0: pedal map in bits 5-6
+                # Byte 6: high nibble = counter (0-15), low nibble = 4
+                # Byte 7: high nibble = (counter + 0xD) mod 16, low nibble = 0
+                cnt = counter & 0xF
+                chk6 = (cnt << 4) | 0x04
+                chk7 = (((cnt + 0xD) & 0xF) << 4)
+                frame = f"{mode_byte:02X} 3F 14 80 FC 07 {chk6:02X} {chk7:02X}"
                 self.ser.write((frame + "\r").encode())
                 time.sleep(0.02)
                 self.ser.read(self.ser.in_waiting)
@@ -385,12 +392,14 @@ class Ghost3D:
                     except Exception:
                         continue
 
-                # Read burst
-                self._read_burst(0.3)
+                # Always read a short burst
+                self._read_burst(0.2)
 
-                # Inject ghost if active
-                if self.ghost_mode is not None:
+                # Then inject if ghost mode active
+                if self.ghost_mode is not None or self.tc_mode != "normal":
                     with self.lock:
+                        self._inject_ghost()
+                        self._inject_ghost()
                         self._inject_ghost()
 
                 # Flush log periodically
