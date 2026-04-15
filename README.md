@@ -214,3 +214,10 @@ This project is for **educational and research purposes only**. Modifying vehicl
 ## License
 
 MIT
+
+
+---
+
+## Author
+
+Built by **Colin McDonough** — [LinkedIn](https://www.linkedin.com/in/colinmcdonoughmarketing) · [GitHub](https://github.com/ColinM-sys)
