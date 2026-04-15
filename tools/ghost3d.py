@@ -319,13 +319,28 @@ class Ghost3D:
         except Exception:
             pass
 
-    def _read_burst(self, duration=0.3):
-        """Read CAN data for a short burst."""
+    def _read_burst(self, duration=0.15):
+        """Read CAN data for a short burst then cleanly stop."""
         if not self.connected:
             return
         try:
+            # Reinit for reading
+            self.ser.write(b"ATSP6\r")
+            time.sleep(0.05)
+            self.ser.read(self.ser.in_waiting)
+            self.ser.write(b"ATCAF0\r")
+            time.sleep(0.05)
+            self.ser.read(self.ser.in_waiting)
+            self.ser.write(b"ATH1\r")
+            time.sleep(0.05)
+            self.ser.read(self.ser.in_waiting)
+            self.ser.write(b"ATS1\r")
+            time.sleep(0.05)
+            self.ser.read(self.ser.in_waiting)
+
+            # Start monitor
             self.ser.write(b"STMA\r")
-            time.sleep(0.01)
+            time.sleep(0.02)
             end = time.time() + duration
             while time.time() < end:
                 if self.ser.in_waiting:
@@ -336,11 +351,9 @@ class Ghost3D:
                         self.unique_ids.add(can_id)
                         elapsed = time.time() - self.start_time
 
-                        # Log raw frame
                         if self.log_file:
                             self.log_file.write(f"{elapsed:.4f} {can_id:03X} {' '.join(data)}\n")
 
-                        # Decode known signals
                         if can_id in SIGNALS:
                             with self.lock:
                                 for sig_name, params in SIGNALS[can_id].items():
@@ -361,14 +374,16 @@ class Ghost3D:
                                         }
                 else:
                     time.sleep(0.005)
-            # Stop monitor
+            # Stop monitor and flush completely
             self.ser.write(b"\r")
+            time.sleep(0.15)
+            self.ser.read(self.ser.in_waiting)
             time.sleep(0.05)
             self.ser.read(self.ser.in_waiting)
         except serial.SerialException:
             self.connected = False
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Read error: {e}")
 
     def run_loop(self):
         """Main loop: alternates between reading CAN and injecting ghost mode."""
