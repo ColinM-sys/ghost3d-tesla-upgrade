@@ -1,0 +1,21 @@
+import serial, time
+print("Hammering COM4 until it connects...", flush=True)
+for attempt in range(60):
+    try:
+        s = serial.Serial("COM4", 115200, timeout=2)
+        time.sleep(0.3)
+        s.write(b"ATZ\r")
+        time.sleep(1.5)
+        r = s.read(s.in_waiting).decode(errors="ignore").strip()
+        if r and "ELM" in r:
+            print(f"CONNECTED on attempt {attempt+1}: {r}", flush=True)
+            s.close()
+            break
+        s.close()
+        print(f"  Attempt {attempt+1}: opened but no response", flush=True)
+    except Exception as e:
+        if attempt % 10 == 0:
+            print(f"  Attempt {attempt+1}: {e}", flush=True)
+    time.sleep(1)
+else:
+    print("Failed after 60 attempts.", flush=True)
